@@ -926,11 +926,7 @@ extension TerminalView {
         }
         #if canImport(MetalKit)
         if metalView != nil {
-            if let current = metalDirtyRange {
-                metalDirtyRange = min (current.lowerBound, bufferRow)...max (current.upperBound, bufferRow)
-            } else {
-                metalDirtyRange = bufferRow...bufferRow
-            }
+            addMetalDirtyRows (bufferRow...bufferRow)
             requestMetalDisplay()
             return
         }
@@ -1845,30 +1841,17 @@ extension TerminalView {
 #if canImport(MetalKit)
         if metalView != nil {
             let buffer = terminal.displayBuffer
-            if buffer.lines.count == 0 {
-                metalDirtyRange = nil
-            } else {
+            // The renderer indexes absolute buffer rows, so translate the view
+            // rows computed above (they start at yDisp) rather than the raw
+            // update range: that way both paths agree on where the changed rows
+            // are displayed, on treating a full-screen refresh as "everything
+            // visible", and on leaving rows below the viewport alone.
+            if viewStart <= viewEnd && buffer.lines.count > 0 {
                 let maxRow = buffer.lines.count - 1
-                let visibleStart = buffer.yDisp
-                let visibleEnd = min(maxRow, buffer.yDisp + buffer.rows - 1)
-                if rowStart >= 0 && rowEnd >= rowStart && rowEnd < terminal.rows {
-                    // Update-range rows are relative to the live screen (yBase),
-                    // not to the scrolled viewport (yDisp).
-                    let absStart = buffer.yBase + rowStart
-                    let absEnd = buffer.yBase + rowEnd
-                    let clampedStart = max(0, min(absStart, maxRow))
-                    let clampedEnd = max(0, min(absEnd, maxRow))
-                    if clampedStart <= clampedEnd {
-                        metalDirtyRange = clampedStart...clampedEnd
-                    } else if visibleStart <= visibleEnd {
-                        metalDirtyRange = visibleStart...visibleEnd
-                    } else {
-                        metalDirtyRange = nil
-                    }
-                } else if visibleStart <= visibleEnd {
-                    metalDirtyRange = visibleStart...visibleEnd
-                } else {
-                    metalDirtyRange = nil
+                let absStart = min (buffer.yDisp + viewStart, maxRow)
+                let absEnd = min (buffer.yDisp + viewEnd, maxRow)
+                if absStart <= absEnd {
+                    addMetalDirtyRows (absStart...absEnd)
                 }
             }
             lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
@@ -1886,7 +1869,9 @@ extension TerminalView {
         // life data being fed into it.
         #if canImport(MetalKit)
         if metalView != nil {
-            metalDirtyRange = metalVisibleRange()
+            if let visible = metalVisibleRange() {
+                addMetalDirtyRows (visible)
+            }
             let buffer = terminal.displayBuffer
             lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
             requestMetalDisplay()
@@ -1979,6 +1964,22 @@ extension TerminalView {
     }
 
 #if canImport(MetalKit)
+    /// Adds rows to the pending Metal dirty range instead of replacing it.
+    ///
+    /// The renderer consumes and clears the range when it draws, and drawing
+    /// happens on a later run-loop pass, so several invalidations can pile up
+    /// between frames — a link highlight and a screen update, say. Replacing
+    /// the range drops the earlier one, and a lost link-highlight row is not
+    /// recoverable: highlights are view state, so the buffer line's generation
+    /// does not change and the renderer keeps its cached row.
+    func addMetalDirtyRows (_ range: ClosedRange<Int>) {
+        if let current = metalDirtyRange {
+            metalDirtyRange = min (current.lowerBound, range.lowerBound)...max (current.upperBound, range.upperBound)
+        } else {
+            metalDirtyRange = range
+        }
+    }
+
     func requestMetalDisplay() {
         guard let metalView = metalView else {
             return
